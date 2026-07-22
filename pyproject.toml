@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tcn-refactor"
 version = "0.1.0"
@@ -5,9 +9,25 @@ description = "Streaming causal TCN for gas-sensor response acceleration and com
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "matplotlib>=3.10",
     "numpy>=2.0",
-    "torch>=2.3",
+    "torch==2.13.0+rocm7.2",
+    "triton-rocm==3.7.1; sys_platform == 'linux'",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm" }
+triton-rocm = { index = "pytorch-rocm" }
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://mirrors.nju.edu.cn/pytorch/whl/rocm7.2/"
+explicit = true
 
 [project.scripts]
 tcn-refactor = "tcn_refactor.cli:main"
