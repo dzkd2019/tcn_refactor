@@ -1,6 +1,6 @@
 """流式 TCN 的训练、验证和 checkpoint 读写。
 
-本模块只训练 ``StreamingTCN``：模型对输入 ``(B, 7, L)`` 输出 ``(B, L)``，
+本模块只训练 ``StreamingTCN``：模型对输入 ``(B, 8, L)`` 输出 ``(B, L)``，
 监督信号是同一浓度标签沿时间维复制后的 ``(B, L)``。时间越靠后，损失权重
 越大，从而让模型更重视 15 秒窗口末端的最终预测。
 """
@@ -38,22 +38,33 @@ def time_weights(length: int, *, ramp_samples: int, device: torch.device) -> tor
 
 def weighted_stream_loss(prediction: torch.Tensor, target_ppm: torch.Tensor,
                          weights: torch.Tensor, concentration_scale: float) -> torch.Tensor:
-    """计算逐时刻相对误差损失，并强化窗口末端预测。
+    """计算逐时刻相对 Huber 损失，并强化窗口末端预测。
 
     参数形状：``prediction=(B, L)``，``target_ppm=(B,)``，``weights=(L,)``。
-    使用 ``(prediction-target)/target`` 后，不同浓度样本具有相近梯度权重，
-    与最终使用的 MAPE 指标一致。末端损失额外乘 2，直接优化 15 秒读数。
+    先计算 ``(prediction-target)/target``，让不同浓度样本具有相近权重。
+    相对误差超过 5% 时，Huber 损失近似绝对百分比误差，直接贴近 MAPE；
+    小于 5% 时改用平滑二次项，避免绝对值函数在零点不可导。末端损失额外
+    乘 2，直接优化 15 秒读数。
 
     ``weights`` 和 ``concentration_scale`` 参数为兼容旧调用保留，不再参与计算。
     """
     del weights, concentration_scale
     target = target_ppm[:, None].expand_as(prediction)
-    relative_squared_error = ((prediction - target) / target.clamp_min(1.0)).square()
+    relative_error = (prediction - target) / target.clamp_min(1.0)
+    absolute_error = relative_error.abs()
+    huber_delta = 0.05
+    # 输出形状仍为 (B, L)。误差小于 delta 时为 0.5*e^2/delta，
+    # 大于 delta 时为 |e|-0.5*delta，两段在连接处数值和梯度都连续。
+    relative_huber = torch.where(
+        absolute_error < huber_delta,
+        0.5 * relative_error.square() / huber_delta,
+        absolute_error - 0.5 * huber_delta,
+    )
     # 当前部署在 15 秒时锁定读数，因此主要监督最后 3 秒。相比把整个窗口
     # 都纳入损失，这不会强迫模型在气体响应尚不可辨识时猜出浓度。
     tail_length = min(300, prediction.shape[1])
-    temporal_loss = relative_squared_error[:, -tail_length:].mean()
-    final_loss = relative_squared_error[:, -1].mean()
+    temporal_loss = relative_huber[:, -tail_length:].mean()
+    final_loss = relative_huber[:, -1].mean()
     return temporal_loss + 2.0 * final_loss
 
 
@@ -63,7 +74,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
     model.eval()
     predictions, targets = [], []
     for features, target in loader:
-        # features: (B, 7, L)，model(features): (B, L)，取 [:, -1] 得到 (B,)
+        # features: (B, 8, L)，model(features): (B, L)，取 [:, -1] 得到 (B,)
         predictions.append(model(features.to(device))[:, -1].cpu())
         targets.append(target)
     p, y = torch.cat(predictions), torch.cat(targets)
@@ -142,6 +153,11 @@ def train_stream_model(data_path: str, checkpoint_path: str, *, validation_path:
     previous_best = float("inf")
     if resume_path is not None:
         payload = torch.load(resume_path, map_location=run_device, weights_only=True)
+        # 第 3 版特征把旧的“一阶方程浓度反演”改成了弱动态先验，输入也从
+        # 7 通道增加到 8 通道。即使张量形状偶然能对上，也不能混用不同语义
+        # 的权重，因此在加载 state_dict 前先做显式版本检查。
+        if payload.get("feature_version") != "weak_prior_v3":
+            raise ValueError("续训 checkpoint 特征版本与当前弱物理先验模型不兼容")
         model.load_state_dict(payload["model_state"])
         # 写回同一 checkpoint 时继承历史门槛；写入新路径时只是热启动，
         # 新实验应按自己的验证分布重新建立最佳指标。
@@ -162,7 +178,7 @@ def train_stream_model(data_path: str, checkpoint_path: str, *, validation_path:
         total_loss, seen = 0.0, 0
         for batch_index, (features, target) in enumerate(train_loader, start=1):
             features, target = features.to(run_device), target.to(run_device)
-            prediction = model(features)  # (B, 7, L) -> (B, L)
+            prediction = model(features)  # (B, 8, L) -> (B, L)
             loss = weighted_stream_loss(prediction, target, weights, config.concentration_scale)
             optimizer.zero_grad()
             loss.backward()
@@ -197,9 +213,9 @@ def _save_checkpoint(checkpoint_path: str, model_state: dict[str, torch.Tensor],
     target = Path(checkpoint_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"format_version": 1, "model_state": model_state, "system_config": asdict(config),
-                "model": {"input_channels": 7, "channels": (32, 64, 96, 96, 64, 32),
-                          "kernel_size": 15, "output_max_ppm": 1200.0,
-                          "correction_scale_ppm": 300.0},
+                "model": {"input_channels": 8, "channels": (32, 64, 96, 96, 64, 32),
+                          "kernel_size": 15, "output_max_ppm": 1200.0},
+                "feature_version": "weak_prior_v3",
                 "validation": validation}, target)
 
 
@@ -208,6 +224,8 @@ def load_stream_model(checkpoint_path: str, *, device: str = "cpu") -> tuple[Str
     run_device = torch.device(device)
     configure_cuda_for_causal_tcn(run_device)
     payload = torch.load(checkpoint_path, map_location=run_device, weights_only=True)
+    if payload.get("feature_version") != "weak_prior_v3":
+        raise ValueError("checkpoint 特征版本与当前弱物理先验模型不兼容")
     model = StreamingTCN(**payload["model"])
     model.load_state_dict(payload["model_state"])
     model.to(device).eval()

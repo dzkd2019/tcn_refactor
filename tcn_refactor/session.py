@@ -19,8 +19,8 @@ class StreamSession:
 
     每次 ``push`` 的数据流为：
     ``Sample -> 基线 -> 检测器 -> FeatureBuilder -> 特征缓冲 -> 模型``。
-    缓冲区内每个特征为 ``(7,)``，堆叠后为 ``(T, 7)``；在送入 PyTorch
-    前转置并增加 batch 维，成为 ``(1, 7, T)``。模型输出形状为 ``(1, T)``。
+    缓冲区内每个特征为 ``(8,)``，堆叠后为 ``(T, 8)``；在送入 PyTorch
+    前转置并增加 batch 维，成为 ``(1, 8, T)``。模型输出形状为 ``(1, T)``。
     """
 
     def __init__(self, model: StreamingTCN, *, config: SystemConfig = SystemConfig(),
@@ -91,7 +91,7 @@ class StreamSession:
             return Prediction(self.state, None, response_samples, self._event_start)
 
         if self._latched is None:
-            # stack 后为 (T, 7)，转置、增加 batch 维后为模型输入 (1, 7, T)。
+            # stack 后为 (T, 8)，转置、增加 batch 维后为模型输入 (1, 8, T)。
             # 右端元素是当前时刻的因果预测。
             x = torch.stack(tuple(self._buffer)).transpose(0, 1).unsqueeze(0).to(self.device)
             with torch.no_grad():

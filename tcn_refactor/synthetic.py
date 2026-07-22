@@ -36,7 +36,9 @@ def generate_scenarios(
         drift *= 0.01 / max(float(np.ptp(drift)), 1e-8)
         baseline = base_nominal + drift
 
-        target = baseline.copy()
+        # ``response`` 只保存相对基线的传感器响应。每个场景随机选择一种
+        # 动力学形式，避免训练数据先验地认定 PdCu 必然是单一一阶系统。
+        response = np.zeros(length, dtype=np.float64)
         concentration = np.zeros(length, dtype=np.float32)
         events: list[GasEvent] = []
         cursor = max(config.calibration_samples + 100, round(25 * config.fs_hz))
@@ -51,16 +53,41 @@ def generate_scenarios(
                 1 - 0.006 * humidity[start]
             )
             amplitude = sensitivity * ppm**0.85
-            target[start:end] = baseline[start:end] + amplitude
+            tau = 30.0 * (1 + 0.020 * humidity[start]) / np.exp(
+                0.012 * (temperature[start] - 20)
+            )
+            # 时间常数允许随浓度小幅变化，模拟真实器件中的浓度依赖。
+            tau *= (ppm / 600.0) ** local.uniform(-0.18, 0.18)
+            event_time = np.arange(end - start, dtype=np.float64) / config.fs_hz
+            kinetics = local.choice(["single", "double", "stretched", "delayed"])
+            if kinetics == "single":
+                progress = 1.0 - np.exp(-event_time / tau)
+            elif kinetics == "double":
+                mix = local.uniform(0.25, 0.75)
+                tau_fast = tau * local.uniform(0.25, 0.65)
+                tau_slow = tau * local.uniform(1.3, 2.5)
+                progress = 1.0 - (
+                    mix * np.exp(-event_time / tau_fast)
+                    + (1.0 - mix) * np.exp(-event_time / tau_slow)
+                )
+            elif kinetics == "stretched":
+                beta = local.uniform(0.55, 1.45)
+                progress = 1.0 - np.exp(-np.power(event_time / tau, beta))
+            else:
+                delay_s = local.uniform(0.2, 2.0)
+                effective_time = np.maximum(event_time - delay_s, 0.0)
+                progress = 1.0 - np.exp(-effective_time / tau)
+            response[start:end] += amplitude * progress
             concentration[start:end] = ppm
             events.append(GasEvent(start, end, ppm))
+            # 暴露结束后使用独立恢复时间常数，体现吸氢/脱氢不对称。
+            if end < length:
+                tau_down = tau * local.uniform(0.8, 2.0)
+                recovery_time = np.arange(length - end, dtype=np.float64) / config.fs_hz
+                response[end:] += amplitude * progress[-1] * np.exp(-recovery_time / tau_down)
             cursor = end + off
 
-        voltage = np.empty(length, dtype=np.float32)
-        voltage[0] = baseline[0]
-        for i in range(1, length):
-            tau = 30.0 * (1 + 0.020 * humidity[i]) / np.exp(0.012 * (temperature[i] - 20))
-            voltage[i] = voltage[i - 1] + (target[i - 1] - voltage[i - 1]) / (tau * config.fs_hz)
+        voltage = (baseline + response).astype(np.float32)
         voltage += local.normal(0.0, 0.004, length).astype(np.float32)
         scenarios.append(Scenario(voltage, temperature.astype(np.float32), humidity.astype(np.float32),
                                   baseline.astype(np.float32), concentration, tuple(events), scenario_seed))

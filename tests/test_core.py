@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn.utils import parametrize
 
 from tcn_refactor.config import SystemConfig
 from tcn_refactor.domain import Sample, SessionState
@@ -35,7 +36,7 @@ class CoreContractTests(unittest.TestCase):
         self.assertEqual(loaded[0].events, scenarios[0].events)
 
     def test_window_and_stream_features_are_identical(self) -> None:
-        """批量窗口与逐点 FeatureBuilder 必须产生相同的 (7, L) 特征。"""
+        """批量窗口与逐点 FeatureBuilder 必须产生相同的 (8, L) 特征。"""
         config = SystemConfig(fs_hz=10, response_window_s=1, calibration_s=1)
         voltage = np.asarray([1.0, 1.02, 1.04], dtype=np.float32)
         temperature = np.asarray([25.0, 25.0, 25.0], dtype=np.float32)
@@ -50,12 +51,19 @@ class CoreContractTests(unittest.TestCase):
         """修改第 11 个样本之后的数据，前 11 个预测必须严格不变。"""
         torch.manual_seed(3)
         model = StreamingTCN(channels=(8, 8)).eval()
-        original = torch.randn(1, 7, 20)
+        original = torch.randn(1, 8, 20)
         changed = original.clone()
         changed[:, :, 11:] += 100.0
         with torch.no_grad():
             output_original, output_changed = model(original), model(changed)
         torch.testing.assert_close(output_original[:, :11], output_changed[:, :11], rtol=0, atol=0)
+
+    def test_causal_convolutions_use_weight_norm(self) -> None:
+        """每个 TCN 残差块的两层因果卷积都必须使用 weight_norm。"""
+        model = StreamingTCN(channels=(8, 8))
+        for block in model.backbone:
+            self.assertTrue(parametrize.is_parametrized(block.conv1.conv, "weight"))
+            self.assertTrue(parametrize.is_parametrized(block.conv2.conv, "weight"))
 
     def test_session_latches_after_full_response_window(self) -> None:
         """完成标定、检测到响应并积累满窗口后，部署会话应产生锁定读数。"""

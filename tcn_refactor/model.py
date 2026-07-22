@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn.utils.parametrizations import weight_norm
 
 
 class CausalConv1d(nn.Module):
@@ -17,8 +18,13 @@ class CausalConv1d(nn.Module):
                  dilation: int = 1) -> None:
         super().__init__()
         self.padding = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size,
-                              dilation=dilation, padding=self.padding)
+        # weight_norm 把卷积核参数化为“方向 + 大小”，优化器可以分别学习两者。
+        # 对多层膨胀 TCN，这通常比直接更新完整卷积核更稳定。它只改变权重
+        # 参数化方式，不改变输入输出形状，也不会破坏因果性。
+        self.conv = weight_norm(
+            nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size,
+                      dilation=dilation, padding=self.padding)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = self.conv(x)
@@ -51,15 +57,14 @@ class TemporalBlock(nn.Module):
 class StreamingTCN(nn.Module):
     """仅用于流式部署的因果 TCN。
 
-    输入张量形状为 ``(B, 7, L)``：B 是 batch 大小，7 是特征通道数，L
+    输入张量形状为 ``(B, 8, L)``：B 是 batch 大小，8 是特征通道数，L
     是时间长度；输出形状为 ``(B, L)``，每个时间步给出一个浓度预测。
     """
 
-    def __init__(self, input_channels: int = 7,
+    def __init__(self, input_channels: int = 8,
                  channels: tuple[int, ...] = (32, 64, 96, 96, 64, 32),
                  kernel_size: int = 15, dropout: float = 0.10,
-                 output_max_ppm: float = 1200.0,
-                 correction_scale_ppm: float = 300.0) -> None:
+                 output_max_ppm: float = 1200.0) -> None:
         super().__init__()
         layers: list[nn.Module] = []
         previous = input_channels
@@ -69,20 +74,14 @@ class StreamingTCN(nn.Module):
         self.backbone = nn.Sequential(*layers)
         self.head = nn.Sequential(nn.Conv1d(previous, previous, 1), nn.ReLU(), nn.Conv1d(previous, 1, 1))
         self.output_max_ppm = output_max_ppm
-        self.correction_scale_ppm = correction_scale_ppm
-        # 最后一层从 0 开始，使训练前模型恰好等于物理粗估；TCN 只需学习
-        # 噪声、基线漂移、检测延迟和物理参数误差造成的残差。
-        nn.init.zeros_(self.head[-1].weight)
-        nn.init.zeros_(self.head[-1].bias)
         # 每个残差块有两层卷积；6 层、kernel=15 时感受野为 1765 点，
         # 大于 100 Hz 下的 15 秒训练窗口（1500 点）。
         self.receptive_field = 1 + 2 * (kernel_size - 1) * sum(2**i for i in range(len(channels)))
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """前向计算，输入 ``(B, 7, L)``，返回 ``(B, L)``。"""
+        """前向计算，输入 ``(B, 8, L)``，返回 ``(B, L)``。"""
         if features.ndim != 3:
             raise ValueError("features 的形状必须为 (batch, channels, time)")
-        physics_ppm = features[:, 6, :] * self.output_max_ppm
-        correction = torch.tanh(self.head(self.backbone(features))).squeeze(1)
-        prediction = physics_ppm + correction * self.correction_scale_ppm
-        return prediction.clamp(0.0, self.output_max_ppm)
+        # 模型直接从观测特征预测浓度，不再把一阶反演值作为输出基线。
+        # sigmoid 保证预测位于传感器标定量程内。
+        return torch.sigmoid(self.head(self.backbone(features))).squeeze(1) * self.output_max_ppm

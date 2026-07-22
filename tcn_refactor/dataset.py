@@ -22,7 +22,7 @@ class WindowRecord:
 class StreamWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """以真实气体事件对齐的流式训练窗口数据集。
 
-    ``__getitem__`` 返回两个张量：特征 ``x`` 的形状为 ``(7, L)``，其中
+    ``__getitem__`` 返回两个张量：特征 ``x`` 的形状为 ``(8, L)``，其中
     ``L=config.window_samples``；标签 ``y`` 是形状 ``()`` 的浓度标量。
     每个 epoch 的随机偏移由 ``epoch + index`` 决定：它既可复现，又会在
     不同 epoch 模拟不同的检测延迟。
