@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 本地生成的数据、训练权重和评估产物体积较大，不提交到代码仓库。
+data/
+checkpoints/
+figures/

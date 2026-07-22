@@ -1,0 +1,23 @@
+[project]
+name = "tcn-refactor"
+version = "0.1.0"
+description = "Streaming causal TCN for gas-sensor response acceleration and compensation"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.0",
+    "torch>=2.3",
+]
+
+[project.scripts]
+tcn-refactor = "tcn_refactor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tcn_refactor*"]
+
+[tool.ruff.lint]
+extend-select = [
+    "I",  # Import-related rules
+    "UP",
+    "NPY",
+]
