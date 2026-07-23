@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 
+from torch.utils.data import DataLoader
+
 from .config import SystemConfig
 from .dataset import StreamWindowDataset
 from .metrics import replay
 from .session import StreamSession
 from .synthetic import generate_scenarios, save_scenarios
 from .training import evaluate_time_points, load_stream_model, train_stream_model
-from torch.utils.data import DataLoader
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--epochs", type=int, default=20, help="训练轮数")
     train.add_argument("--batch-size", type=int, default=32, help="每批窗口数")
     train.add_argument("--lr", type=float, default=5e-4, help="AdamW 学习率；续训时建议降低")
+    train.add_argument("--warmup-epochs", type=int, default=0, help="线性 warmup 轮数")
+    train.add_argument("--min-lr", type=float, help="余弦退火最低学习率；不提供则保持固定学习率")
     train.add_argument("--device", default="cpu", help="例如 cpu 或 cuda")
     train.add_argument("--resume", help="从已有最佳 checkpoint 续训")
 
@@ -62,6 +65,7 @@ def main() -> None:
     elif args.command == "train":
         result = train_stream_model(args.data, args.checkpoint, validation_path=args.val_data, epochs=args.epochs,
                                     batch_size=args.batch_size, device=args.device, learning_rate=args.lr,
+                                    warmup_epochs=args.warmup_epochs, min_learning_rate=args.min_lr,
                                     resume_path=args.resume)
         print(f"训练完成：验证集 MAPE={result['mape']:.2f}%")
     elif args.command == "replay":

@@ -27,9 +27,6 @@ class StreamSession:
                  device: torch.device | str = "cpu") -> None:
         self.model = model.to(device).eval()
         self.config, self.device = config, torch.device(device)
-        # 与训练侧保持一致：当前因果卷积实现可安全使用 cuDNN。
-        if self.device.type == "cuda":
-            torch.backends.cudnn.enabled = True
         self.baseline = BaselineEstimator(config)
         self.detector = ResponseDetector(config)
         self.features = FeatureBuilder(config)

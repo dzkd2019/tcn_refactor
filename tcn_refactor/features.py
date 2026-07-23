@@ -26,8 +26,9 @@ class FeatureBuilder:
         self._previous_voltage = None
         self._delta_sum = 0.0
         self._count = 0
-        self._smooth_window: deque[float] = deque(maxlen=50)
-        self._smooth_history: deque[float] = deque(maxlen=51)
+        self._smooth_samples = max(1, round(2.0 * self.config.fs_hz))
+        self._smooth_window: deque[float] = deque(maxlen=self._smooth_samples)
+        self._smooth_history: deque[float] = deque(maxlen=self._smooth_samples + 1)
 
     def build_one(self, sample: Sample, baseline: float) -> np.ndarray:
         """把一条原始样本转为形状 ``(8,)`` 的模型输入特征。"""
@@ -40,7 +41,7 @@ class FeatureBuilder:
         self._count += 1
         running_mean = self._delta_sum / self._count
         elapsed = min(self._count / self.config.window_samples, 1.0)
-        # 先对最近 0.5 秒响应做因果移动平均，再计算相隔最多 0.5 秒的斜率。
+        # 先对最近 2 秒响应做因果移动平均，再计算相隔最多 2 秒的斜率。
         # 相比逐点差分，它对电压噪声更鲁棒，又不要求响应符合任何方程。
         self._smooth_window.append(voltage_feature)
         smoothed = float(np.mean(self._smooth_window))
@@ -87,11 +88,12 @@ def build_window(voltage: np.ndarray, temperature: np.ndarray, humidity: np.ndar
     sample_count = np.arange(1, len(voltage) + 1, dtype=np.float32)
     running_mean = np.cumsum(voltage_feature, dtype=np.float32) / sample_count
     elapsed = np.minimum(sample_count / config.window_samples, 1.0)
-    smoothed = _causal_moving_average(voltage_feature, window=50)
-    lag = 50
+    smoothing_samples = max(1, round(2.0 * config.fs_hz))
+    smoothed = _causal_moving_average(voltage_feature, window=smoothing_samples)
+    lag = smoothing_samples
     smooth_slope = np.zeros_like(smoothed)
-    # 前 0.5 秒使用“当前平滑值 - 第一个平滑值”除以实际间隔；之后固定
-    # 使用 0.5 秒间隔。这与 FeatureBuilder 的在线 deque 实现一致。
+    # 前 2 秒使用“当前平滑值 - 第一个平滑值”除以实际间隔；之后固定
+    # 使用 2 秒间隔。这与 FeatureBuilder 的在线 deque 实现一致。
     if len(smoothed) > 1:
         early_index = np.arange(1, min(lag, len(smoothed)), dtype=np.float32)
         smooth_slope[1:min(lag, len(smoothed))] = (
@@ -134,9 +136,10 @@ def _steady_response_proxy(smoothed_response: np.ndarray | float,
     """
     temperature = np.asarray(temperature_c, dtype=np.float32)
     humidity = np.asarray(humidity_rh, dtype=np.float32)
-    nominal_tau = 30.0 * (1.0 + 0.020 * humidity) / np.exp(
-        0.012 * (temperature - 20.0)
-    )
+    # 该任务使用同一支已标定传感器；生成器中的环境修正相对于暴露前环境，
+    # 而不是温湿度绝对值。窗口内缺少这个参考点，因此使用标定得到的 30 秒
+    # 名义时间常数比基于绝对温湿度进行错误放大更稳健。
+    nominal_tau = 30.0 + np.zeros_like(temperature + humidity)
     # smooth_slope 的归一化单位为 (V/s)/DVDT_REF，需要换回归一化响应每秒。
     normalized_slope = (
         np.asarray(smooth_slope) * config.dvdt_ref / config.voltage_ref
