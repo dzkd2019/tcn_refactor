@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 import numpy as np
 
 
-class SessionState(str, Enum):
+class SessionState(StrEnum):
     CALIBRATING = "calibrating"
     IDLE = "idle"
     RESPONDING = "responding"

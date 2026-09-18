@@ -28,12 +28,20 @@ class FeatureBuilder:
         self._count = 0
         self._smooth_samples = max(1, round(2.0 * self.config.fs_hz))
         self._smooth_window: deque[float] = deque(maxlen=self._smooth_samples)
-        self._smooth_history: deque[float] = deque(maxlen=self._smooth_samples + 1)
+        self._smooth_history: deque[float] = deque(
+            maxlen=self._smooth_samples + 1
+        )
 
     def build_one(self, sample: Sample, baseline: float) -> np.ndarray:
         """把一条原始样本转为形状 ``(8,)`` 的模型输入特征。"""
-        derivative = 0.0 if self._previous_voltage is None else (
-            (sample.voltage - self._previous_voltage) * self.config.fs_hz / self.config.dvdt_ref
+        derivative = (
+            0.0
+            if self._previous_voltage is None
+            else (
+                (sample.voltage - self._previous_voltage)
+                * self.config.fs_hz
+                / self.config.dvdt_ref
+            )
         )
         self._previous_voltage = sample.voltage
         voltage_feature = (sample.voltage - baseline) / self.config.voltage_ref
@@ -47,29 +55,51 @@ class FeatureBuilder:
         smoothed = float(np.mean(self._smooth_window))
         self._smooth_history.append(smoothed)
         lag = len(self._smooth_history) - 1
-        smooth_slope = 0.0 if lag == 0 else (
-            (smoothed - self._smooth_history[0]) * self.config.voltage_ref
-            * self.config.fs_hz / lag / self.config.dvdt_ref
+        smooth_slope = (
+            0.0
+            if lag == 0
+            else (
+                (smoothed - self._smooth_history[0])
+                * self.config.voltage_ref
+                * self.config.fs_hz
+                / lag
+                / self.config.dvdt_ref
+            )
         )
         steady_proxy = _steady_response_proxy(
-            smoothed, smooth_slope, sample.temperature_c, sample.humidity_rh,
+            smoothed,
+            smooth_slope,
+            sample.temperature_c,
+            sample.humidity_rh,
             self.config,
         )
-        return np.asarray([
-            voltage_feature,
-            derivative,
-            running_mean,
-            (sample.temperature_c - self.config.temperature_ref) / self.config.temperature_scale,
-            (sample.humidity_rh - self.config.humidity_ref) / self.config.humidity_scale,
-            elapsed,
-            smooth_slope,
-            steady_proxy,
-        ], dtype=np.float32)
+        return np.asarray(
+            [
+                voltage_feature,
+                derivative,
+                running_mean,
+                (sample.temperature_c - self.config.temperature_ref)
+                / self.config.temperature_scale,
+                (sample.humidity_rh - self.config.humidity_ref)
+                / self.config.humidity_scale,
+                elapsed,
+                smooth_slope,
+                steady_proxy,
+            ],
+            dtype=np.float32,
+        )
 
 
-def build_window(voltage: np.ndarray, temperature: np.ndarray, humidity: np.ndarray,
-                 baseline: float, config: SystemConfig = SystemConfig()) -> np.ndarray:
+def build_window(
+    voltage: np.ndarray,
+    temperature: np.ndarray,
+    humidity: np.ndarray,
+    baseline: float,
+    config: SystemConfig = SystemConfig(),
+) -> np.ndarray:
     """向量化构造窗口特征，返回形状 ``(8, 时间长度)`` 的数组。
+    原始电压归一化，温度和湿度归一化，电压导数归一化，累计平均电压归一化，已响应时间归一化，
+    平滑斜率归一化，弱稳态响应外推归一化。
 
     这里没有逐点 Python 循环：NumPy 一次完成整段窗口的减法、差分和缩放，
     可显著降低 DataLoader 的 CPU 开销。八个公式与 ``build_one`` 完全相同。
@@ -89,6 +119,7 @@ def build_window(voltage: np.ndarray, temperature: np.ndarray, humidity: np.ndar
     running_mean = np.cumsum(voltage_feature, dtype=np.float32) / sample_count
     elapsed = np.minimum(sample_count / config.window_samples, 1.0)
     smoothing_samples = max(1, round(2.0 * config.fs_hz))
+    # 因果平均后的归一化电压
     smoothed = _causal_moving_average(voltage_feature, window=smoothing_samples)
     lag = smoothing_samples
     smooth_slope = np.zeros_like(smoothed)
@@ -96,21 +127,36 @@ def build_window(voltage: np.ndarray, temperature: np.ndarray, humidity: np.ndar
     # 使用 2 秒间隔。这与 FeatureBuilder 的在线 deque 实现一致。
     if len(smoothed) > 1:
         early_index = np.arange(1, min(lag, len(smoothed)), dtype=np.float32)
-        smooth_slope[1:min(lag, len(smoothed))] = (
-            (smoothed[1:min(lag, len(smoothed))] - smoothed[0])
-            * config.voltage_ref * config.fs_hz / early_index / config.dvdt_ref
+        smooth_slope[1 : min(lag, len(smoothed))] = (
+            (smoothed[1 : min(lag, len(smoothed))] - smoothed[0])
+            * config.voltage_ref
+            * config.fs_hz
+            / early_index
+            / config.dvdt_ref
         )
     if len(smoothed) > lag:
         smooth_slope[lag:] = (
-            (smoothed[lag:] - smoothed[:-lag]) * config.voltage_ref
-            * config.fs_hz / lag / config.dvdt_ref
+            (smoothed[lag:] - smoothed[:-lag])
+            * config.voltage_ref
+            * config.fs_hz
+            / lag
+            / config.dvdt_ref
         )
     steady_proxy = _steady_response_proxy(
         smoothed, smooth_slope, temperature, humidity, config
     )
     return np.stack(
-        [voltage_feature, derivative, running_mean, temperature_feature,
-         humidity_feature, elapsed, smooth_slope, steady_proxy], axis=0
+        [
+            voltage_feature,
+            derivative,
+            running_mean,
+            temperature_feature,
+            humidity_feature,
+            elapsed,
+            smooth_slope,
+            steady_proxy,
+        ],
+        axis=0,
     ).astype(np.float32, copy=False)
 
 
@@ -123,11 +169,13 @@ def _causal_moving_average(values: np.ndarray, window: int) -> np.ndarray:
     return (result / denominator).astype(np.float32)
 
 
-def _steady_response_proxy(smoothed_response: np.ndarray | float,
-                           smooth_slope: np.ndarray | float,
-                           temperature_c: np.ndarray | float,
-                           humidity_rh: np.ndarray | float,
-                           config: SystemConfig) -> np.ndarray | float:
+def _steady_response_proxy(
+    smoothed_response: np.ndarray | float,
+    smooth_slope: np.ndarray | float,
+    temperature_c: np.ndarray | float,
+    humidity_rh: np.ndarray | float,
+    config: SystemConfig,
+) -> np.ndarray | float:
     """计算 ``y_f + tau*dy_f/dt`` 弱稳态响应先验。
 
     该特征不使用浓度标定曲线，也不执行 ``F^{-1}``，因此不会把“一阶反演
@@ -145,6 +193,10 @@ def _steady_response_proxy(smoothed_response: np.ndarray | float,
         np.asarray(smooth_slope) * config.dvdt_ref / config.voltage_ref
     )
     estimate = np.clip(
-        np.asarray(smoothed_response) + nominal_tau * normalized_slope, -0.5, 2.0
+        np.asarray(smoothed_response) + nominal_tau * normalized_slope,
+        -0.5,
+        2.0,
     )
-    return float(estimate) if estimate.ndim == 0 else estimate.astype(np.float32)
+    return (
+        float(estimate) if estimate.ndim == 0 else estimate.astype(np.float32)
+    )
